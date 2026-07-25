@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Scraping output (generated data + PDFs)
+output/
+
+# Environment secrets
+.env
+.env.local
+
+# Debug scripts and snapshots (archived in debug/)
+debug/
+
+# ATL/SDD internal
+.atl/
+
+# TypeScript generated files
+*.js.map
+*.d.ts
+*.d.ts.map
+
+# Logs
+*.log

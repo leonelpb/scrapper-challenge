@@ -1,0 +1,39 @@
+{
+  "name": "scraper-challenge",
+  "version": "1.0.0",
+  "description": "TypeScript scraper for PJ Peru jurisprudence and OEFA — HTTP-only, no browser automation",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "scrape:pj": "node dist/index.js --profile pj",
+    "scrape:oefa": "node dist/index.js --profile oefa",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx src/**/*.test.ts"
+  },
+  "keywords": [
+    "scraper",
+    "jsf",
+    "richfaces",
+    "primefaces",
+    "peru",
+    "jurisprudencia"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
