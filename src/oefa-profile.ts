@@ -20,7 +20,7 @@ import type {
   FailedDownload,
   Checkpoint,
 } from "./types.js";
-import { createSessionClient, withRetry, sleep } from "./http-client.js";
+import { createSessionClient, withRetry, sleep, validateJsfResponse } from "./http-client.js";
 import { log } from "./logger.js";
 import { exportToExcel } from "./excel-export.js";
 
@@ -62,6 +62,7 @@ export async function initSession(
   }
 
   const html = typeof res.data === "string" ? res.data : "";
+  validateJsfResponse(html, "OEFA initSession");
   const $ = cheerio.load(html);
 
   const viewState =
@@ -127,6 +128,9 @@ export async function search(
   );
 
   const html = typeof res.data === "string" ? res.data : "";
+
+  // Validate session is alive (JSF returns 200 even on expiry)
+  validateJsfResponse(html, "OEFA search");
 
   // Update ViewState from response
   updateViewStateFromResponse(html, session);
@@ -357,6 +361,9 @@ export async function goToPage(
 
   const html = typeof res.data === "string" ? res.data : "";
 
+  // Validate session is alive (JSF returns 200 even on expiry)
+  validateJsfResponse(html, `OEFA goToPage ${targetPage}`);
+
   // Update ViewState from response
   updateViewStateFromResponse(html, session);
 
@@ -467,6 +474,13 @@ export async function scrape(config: AppConfig): Promise<void> {
   fs.mkdirSync(config.outputDir, { recursive: true });
   fs.mkdirSync(path.join(config.outputDir, "pdfs"), { recursive: true });
 
+  // Load existing document IDs for idempotent writes
+  const jsonlPath = path.join(config.outputDir, DATA_FILE);
+  const writtenIds = loadExistingJsonlIds(jsonlPath);
+  if (writtenIds.size > 0) {
+    log.info(`OEFA: Found ${writtenIds.size} existing documents — will skip duplicates`);
+  }
+
   // Load checkpoint if exists
   const checkpoint = loadCheckpoint(config);
   let startPage = checkpoint?.nextPage ?? 1;
@@ -493,7 +507,11 @@ export async function scrape(config: AppConfig): Promise<void> {
       }
     }
 
-    appendJsonl(path.join(config.outputDir, DATA_FILE), doc);
+    // Idempotent write: skip if this document ID was already written
+    if (!writtenIds.has(doc.id)) {
+      appendJsonl(jsonlPath, doc);
+      writtenIds.add(doc.id);
+    }
     await sleep(config.requestDelayMs);
 
     // Check stop conditions
@@ -501,6 +519,8 @@ export async function scrape(config: AppConfig): Promise<void> {
     return false;
   }
 
+  // ── Main scraping logic (try/finally ensures Excel export) ──
+  try {
   // Step 1: Search
   const searchHtml = await search(client, session, config);
   await sleep(config.requestDelayMs);
@@ -716,9 +736,10 @@ export async function scrape(config: AppConfig): Promise<void> {
   }
 
   log.success(`OEFA: Scraping complete — ${totalDocs} documents, ${pdfsDownloaded} PDFs`);
-
-  // ── Export to Excel ──────────────────────────────────────
-  exportToExcel(config.outputDir);
+  } finally {
+    // ── Export to Excel (always runs, even on early exit) ──
+    exportToExcel(config.outputDir);
+  }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -787,12 +808,41 @@ function appendJsonl(filePath: string, data: unknown): void {
   fs.appendFileSync(filePath, line, "utf-8");
 }
 
-function saveCheckpoint(config: AppConfig, checkpoint: Checkpoint): void {
+/**
+ * Load document IDs already present in a JSONL file.
+ * Used to make append operations idempotent — resuming a scraped run
+ * will not duplicate documents that were written before interruption.
+ */
+export function loadExistingJsonlIds(filePath: string): Set<string> {
+  const ids = new Set<string>();
+  if (!fs.existsSync(filePath)) return ids;
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8").trim();
+    if (!raw) return ids;
+
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const doc = JSON.parse(line) as { id?: string };
+        if (doc.id) ids.add(doc.id);
+      } catch {
+        // Skip malformed lines
+      }
+    }
+  } catch {
+    // File read error — start fresh
+  }
+
+  return ids;
+}
+
+export function saveCheckpoint(config: AppConfig, checkpoint: Checkpoint): void {
   const filePath = path.join(config.outputDir, CHECKPOINT_FILE);
   fs.writeFileSync(filePath, JSON.stringify(checkpoint, null, 2), "utf-8");
 }
 
-function loadCheckpoint(config: AppConfig): Checkpoint | null {
+export function loadCheckpoint(config: AppConfig): Checkpoint | null {
   const filePath = path.join(config.outputDir, CHECKPOINT_FILE);
   if (!fs.existsSync(filePath)) return null;
 

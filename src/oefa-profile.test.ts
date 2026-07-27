@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -10,9 +10,20 @@ import {
   generateId,
   makeSafeFilename,
   updateViewStateFromResponse,
+  loadExistingJsonlIds,
+  saveCheckpoint,
+  loadCheckpoint,
 } from "./oefa-profile.js";
-import { withRetry } from "./http-client.js";
-import type { JsfSession, ScrapedDocument } from "./types.js";
+import { withRetry, validateJsfResponse } from "./http-client.js";
+import { exportToExcel } from "./excel-export.js";
+import type { JsfSession, ScrapedDocument, Checkpoint, AppConfig } from "./types.js";
+
+// PJ profile functions
+import { parseResults as pjParseResults } from "./pj-profile.js";
+import {
+  saveCheckpoint as pjSaveCheckpoint,
+  loadCheckpoint as pjLoadCheckpoint,
+} from "./pj-profile.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(__dirname, "__fixtures__");
@@ -433,5 +444,558 @@ describe("withRetry", () => {
     assert.equal(result.success, false);
     assert.equal(result.attempts, 3);
     assert.ok(result.error?.includes("ETIMEDOUT"));
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  validateJsfResponse — session expiry detection
+// ════════════════════════════════════════════════════════════════
+
+describe("validateJsfResponse", () => {
+  it("passes for valid JSF response with ViewState", () => {
+    const html =
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<partial-response><update id="javax.faces.ViewState">' +
+      "<![CDATA[valid-view-state-abc123]]>" +
+      "</update></partial-response>";
+    assert.doesNotThrow(() => validateJsfResponse(html, "test"));
+  });
+
+  it("passes for full HTML page with ViewState input", () => {
+    const html =
+      '<html><body><form>' +
+      '<input type="hidden" name="javax.faces.ViewState" value="xyz" />' +
+      "</form></body></html>";
+    assert.doesNotThrow(() => validateJsfResponse(html, "test"));
+  });
+
+  it("throws when ViewState is missing", () => {
+    const html = "<html><body><p>No JSF here</p></body></html>";
+    assert.throws(
+      () => validateJsfResponse(html, "test"),
+      /missing ViewState/
+    );
+  });
+
+  it("throws when response is a login page with password field", () => {
+    const html =
+      '<html><body><form>' +
+      '<input type="hidden" name="javax.faces.ViewState" value="expired-session" />' +
+      '<input name="password" />' +
+      '<p>Iniciar sesion</p>' +
+      "</form></body></html>";
+    assert.throws(
+      () => validateJsfResponse(html, "test"),
+      /login page/
+    );
+  });
+
+  it("throws for empty response", () => {
+    assert.throws(
+      () => validateJsfResponse("", "test"),
+      /missing ViewState/
+    );
+  });
+
+  it("does not throw for response with ViewState but no login indicators", () => {
+    const html =
+      '<partial-response><update id="javax.faces.ViewState">' +
+      "<![CDATA[session-ok]]>" +
+      "</update></partial-response>";
+    assert.doesNotThrow(() => validateJsfResponse(html, "test"));
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  loadExistingJsonlIds — idempotent write support
+// ════════════════════════════════════════════════════════════════
+
+describe("loadExistingJsonlIds", () => {
+  const tmpDir = path.join(__dirname, "__test_tmp__");
+
+  beforeEach(() => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns empty set for non-existent file", () => {
+    const ids = loadExistingJsonlIds(path.join(tmpDir, "nope.jsonl"));
+    assert.equal(ids.size, 0);
+  });
+
+  it("returns empty set for empty file", () => {
+    const filePath = path.join(tmpDir, "empty.jsonl");
+    fs.writeFileSync(filePath, "", "utf-8");
+    const ids = loadExistingJsonlIds(filePath);
+    assert.equal(ids.size, 0);
+  });
+
+  it("extracts IDs from JSONL file", () => {
+    const filePath = path.join(tmpDir, "docs.jsonl");
+    const lines = [
+      JSON.stringify({ id: "doc-1", title: "First" }),
+      JSON.stringify({ id: "doc-2", title: "Second" }),
+      JSON.stringify({ id: "doc-3", title: "Third" }),
+    ].join("\n");
+    fs.writeFileSync(filePath, lines, "utf-8");
+
+    const ids = loadExistingJsonlIds(filePath);
+    assert.equal(ids.size, 3);
+    assert.ok(ids.has("doc-1"));
+    assert.ok(ids.has("doc-2"));
+    assert.ok(ids.has("doc-3"));
+  });
+
+  it("skips malformed lines gracefully", () => {
+    const filePath = path.join(tmpDir, "mixed.jsonl");
+    const lines = [
+      JSON.stringify({ id: "good-1", title: "OK" }),
+      "NOT JSON AT ALL",
+      JSON.stringify({ id: "good-2", title: "Also OK" }),
+      "",
+    ].join("\n");
+    fs.writeFileSync(filePath, lines, "utf-8");
+
+    const ids = loadExistingJsonlIds(filePath);
+    assert.equal(ids.size, 2);
+    assert.ok(ids.has("good-1"));
+    assert.ok(ids.has("good-2"));
+  });
+
+  it("skips lines without id field", () => {
+    const filePath = path.join(tmpDir, "no-ids.jsonl");
+    const lines = [
+      JSON.stringify({ title: "No ID here" }),
+      JSON.stringify({ id: "has-id", title: "Has ID" }),
+    ].join("\n");
+    fs.writeFileSync(filePath, lines, "utf-8");
+
+    const ids = loadExistingJsonlIds(filePath);
+    assert.equal(ids.size, 1);
+    assert.ok(ids.has("has-id"));
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  PJ parseResults — RichFaces panel parsing
+// ════════════════════════════════════════════════════════════════
+
+const PJ_BASE = "https://jurisprudencia.pj.gob.pe";
+
+describe("PJ parseResults", () => {
+  it("parses panels with download links and extracts UUIDs", () => {
+    const html = readFixture("pj-search-response.html");
+    const result = pjParseResults(html, 1, PJ_BASE);
+
+    assert.equal(result.documents.length, 3, "should parse 3 panels");
+    assert.equal(result.currentPage, 1);
+    assert.equal(result.totalPages, 3);
+
+    // First panel — has PDF link with UUID
+    const doc1 = result.documents[0];
+    assert.equal(doc1.source, "pj");
+    assert.equal(doc1.page, 1);
+    assert.equal(doc1.position, 1);
+    assert.ok(doc1.pdfUrl?.includes("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
+    assert.equal(doc1.id, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+    assert.equal(doc1.fields?.["Recurso"], "Casación Laboral");
+    assert.equal(doc1.fields?.["Expediente"], "001-2023-CSJL");
+
+    // Second panel — has PDF link
+    const doc2 = result.documents[1];
+    assert.ok(doc2.pdfUrl?.includes("b2c3d4e5-f6a7-8901-bcde-f12345678901"));
+
+    // Third panel — no download link
+    const doc3 = result.documents[2];
+    assert.equal(doc3.pdfUrl, null);
+    assert.equal(doc3.title, "Queja Laboral 003-2023-CSJT");
+  });
+
+  it("returns empty documents for page with no panels", () => {
+    const html = readFixture("pj-empty-response.html");
+    const result = pjParseResults(html, 1, PJ_BASE);
+
+    assert.equal(result.documents.length, 0);
+    assert.equal(result.totalPages, 1);
+  });
+
+  it("builds title from Recurso + Expediente fields", () => {
+    const html = readFixture("pj-search-response.html");
+    const result = pjParseResults(html, 1, PJ_BASE);
+
+    const doc = result.documents[0];
+    assert.equal(doc.title, "Casación Laboral 001-2023-CSJL");
+  });
+
+  it("extracts pagination info from rf-pg-lbl", () => {
+    const html = readFixture("pj-search-response.html");
+    const result = pjParseResults(html, 1, PJ_BASE);
+
+    assert.equal(result.totalPages, 3);
+    assert.equal(result.currentPage, 1);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Checkpoint — save/load/idempotency guard
+// ════════════════════════════════════════════════════════════════
+
+describe("OEFA checkpoint", () => {
+  const tmpDir = path.join(__dirname, "__test_checkpoint__");
+
+  beforeEach(() => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
+    return {
+      profile: "oefa",
+      baseUrl: "https://publico.oefa.gob.pe/repdig",
+      searchTerm: "",
+      maxPages: 10,
+      maxDocuments: 100,
+      requestDelayMs: 100,
+      requestTimeoutMs: 30000,
+      retryMax: 3,
+      retryBackoffMs: 1000,
+      downloadPdfs: false,
+      outputDir: tmpDir,
+      ...overrides,
+    };
+  }
+
+  it("returns null when no checkpoint file exists", () => {
+    const cp = loadCheckpoint(makeConfig());
+    assert.equal(cp, null);
+  });
+
+  it("saves and loads a valid checkpoint", () => {
+    const config = makeConfig();
+    const checkpoint: Checkpoint = {
+      profile: "oefa",
+      searchTerm: "test",
+      nextPage: 5,
+      nextPosition: 3,
+      totalDocuments: 43,
+      completed: false,
+      timestamp: "2024-01-15T10:30:00Z",
+    };
+
+    saveCheckpoint(config, checkpoint);
+    const loaded = loadCheckpoint(config);
+
+    assert.notEqual(loaded, null);
+    assert.equal(loaded?.nextPage, 5);
+    assert.equal(loaded?.nextPosition, 3);
+    assert.equal(loaded?.totalDocuments, 43);
+    assert.equal(loaded?.completed, false);
+  });
+
+  it("returns null when checkpoint is completed (prevents re-run)", () => {
+    const config = makeConfig();
+    saveCheckpoint(config, {
+      profile: "oefa",
+      searchTerm: "test",
+      nextPage: 10,
+      nextPosition: 0,
+      totalDocuments: 95,
+      completed: true,
+      timestamp: "2024-01-15T10:30:00Z",
+    });
+
+    const cp = loadCheckpoint(config);
+    assert.equal(cp, null, "completed checkpoint should return null");
+  });
+
+  it("returns null when profile does not match", () => {
+    const config = makeConfig();
+    saveCheckpoint(config, {
+      profile: "pj", // wrong profile
+      searchTerm: "test",
+      nextPage: 3,
+      nextPosition: 0,
+      totalDocuments: 20,
+      completed: false,
+      timestamp: "2024-01-15T10:30:00Z",
+    });
+
+    const cp = loadCheckpoint(config);
+    assert.equal(cp, null, "mismatched profile should return null");
+  });
+
+  it("returns null for malformed JSON", () => {
+    const cpPath = path.join(tmpDir, "checkpoint.json");
+    fs.writeFileSync(cpPath, "{ broken json", "utf-8");
+
+    const cp = loadCheckpoint(makeConfig());
+    assert.equal(cp, null);
+  });
+});
+
+describe("PJ checkpoint", () => {
+  const tmpDir = path.join(__dirname, "__test_checkpoint_pj__");
+
+  beforeEach(() => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
+    return {
+      profile: "pj",
+      baseUrl: "https://jurisprudencia.pj.gob.pe",
+      searchTerm: "despido",
+      maxPages: 10,
+      maxDocuments: 100,
+      requestDelayMs: 100,
+      requestTimeoutMs: 30000,
+      retryMax: 3,
+      retryBackoffMs: 1000,
+      downloadPdfs: false,
+      outputDir: tmpDir,
+      ...overrides,
+    };
+  }
+
+  it("returns null when checkpoint is completed", () => {
+    const config = makeConfig();
+    pjSaveCheckpoint(config, {
+      profile: "pj",
+      searchTerm: "despido",
+      nextPage: 5,
+      nextPosition: 0,
+      totalDocuments: 40,
+      completed: true,
+      timestamp: "2024-01-15T10:30:00Z",
+    });
+
+    const cp = pjLoadCheckpoint(config);
+    assert.equal(cp, null);
+  });
+
+  it("returns null when searchTerm does not match", () => {
+    const config = makeConfig();
+    pjSaveCheckpoint(config, {
+      profile: "pj",
+      searchTerm: "otra cosa", // different search term
+      nextPage: 3,
+      nextPosition: 0,
+      totalDocuments: 20,
+      completed: false,
+      timestamp: "2024-01-15T10:30:00Z",
+    });
+
+    const cp = pjLoadCheckpoint(config);
+    assert.equal(cp, null, "mismatched searchTerm should return null");
+  });
+
+  it("saves and loads a valid incomplete checkpoint", () => {
+    const config = makeConfig();
+    pjSaveCheckpoint(config, {
+      profile: "pj",
+      searchTerm: "despido",
+      nextPage: 3,
+      nextPosition: 2,
+      totalDocuments: 22,
+      completed: false,
+      timestamp: "2024-01-15T10:30:00Z",
+    });
+
+    const cp = pjLoadCheckpoint(config);
+    assert.notEqual(cp, null);
+    assert.equal(cp?.nextPage, 3);
+    assert.equal(cp?.nextPosition, 2);
+    assert.equal(cp?.totalDocuments, 22);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Excel export — generates valid .xlsx from JSONL
+// ════════════════════════════════════════════════════════════════
+
+describe("exportToExcel", () => {
+  const tmpDir = path.join(__dirname, "__test_excel__");
+
+  beforeEach(() => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns null when no JSONL exists", () => {
+    const result = exportToExcel(tmpDir);
+    assert.equal(result, null);
+  });
+
+  it("generates xlsx from JSONL with valid documents", () => {
+    // Create a JSONL with sample documents
+    const docs = [
+      {
+        source: "oefa",
+        page: 1,
+        position: 1,
+        id: "doc-1",
+        title: "891-08-PRODUCE",
+        fields: {
+          "N° Expediente": "891-08-PRODUCE",
+          Administrado: "Corporación del Mar S.A.",
+          "Unidad fiscalizable": "Planta Playa",
+          Sector: "Pesquería",
+          "N° Resolución de Apelación": "264-2012-OEFA/TFA",
+        },
+        pdfUrl: "https://example.com/pdf?param_uuid=abc-123",
+        pdfFile: "doc1_abc123.pdf",
+        scrapedAt: "2024-01-15T10:00:00Z",
+      },
+      {
+        source: "oefa",
+        page: 1,
+        position: 2,
+        id: "doc-2",
+        title: "857-2011-PRODUCE",
+        fields: {
+          "N° Expediente": "857-2011-PRODUCE",
+          Administrado: "Pesquera del Sur S.A.",
+          "Unidad fiscalizable": "Embarcación",
+          Sector: "Pesquería",
+          "N° Resolución de Apelación": "100-2011-OEFA/TFA",
+        },
+        pdfUrl: null,
+        pdfFile: null,
+        scrapedAt: "2024-01-15T10:01:00Z",
+      },
+    ];
+
+    const jsonlPath = path.join(tmpDir, "documents.jsonl");
+    const lines = docs.map((d) => JSON.stringify(d)).join("\n") + "\n";
+    fs.writeFileSync(jsonlPath, lines, "utf-8");
+
+    const result = exportToExcel(tmpDir);
+
+    assert.notEqual(result, null, "should return output path");
+    assert.ok(result?.endsWith(".xlsx"), "should be .xlsx file");
+
+    // Verify file exists and has content
+    const stat = fs.statSync(result!);
+    assert.ok(stat.size > 0, "xlsx file should not be empty");
+
+    // Verify the excel directory was created
+    const excelDir = path.join(tmpDir, "excel");
+    assert.ok(fs.existsSync(excelDir), "excel/ directory should exist");
+  });
+
+  it("returns null when JSONL is empty", () => {
+    const jsonlPath = path.join(tmpDir, "documents.jsonl");
+    fs.writeFileSync(jsonlPath, "", "utf-8");
+
+    const result = exportToExcel(tmpDir);
+    assert.equal(result, null);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Idempotency orchestration — resume does not duplicate
+// ════════════════════════════════════════════════════════════════
+
+describe("Idempotency orchestration", () => {
+  const tmpDir = path.join(__dirname, "__test_idempotency__");
+
+  beforeEach(() => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("loadExistingJsonlIds detects docs already written before resume", () => {
+    // Simulate: first run wrote 3 docs, got interrupted
+    const jsonlPath = path.join(tmpDir, "documents.jsonl");
+    const docs = [
+      { id: "doc-1", title: "First", source: "oefa" },
+      { id: "doc-2", title: "Second", source: "oefa" },
+      { id: "doc-3", title: "Third", source: "oefa" },
+    ];
+    const lines = docs.map((d) => JSON.stringify(d)).join("\n") + "\n";
+    fs.writeFileSync(jsonlPath, lines, "utf-8");
+
+    // Load existing IDs (simulating resume)
+    const writtenIds = loadExistingJsonlIds(jsonlPath);
+    assert.equal(writtenIds.size, 3);
+    assert.ok(writtenIds.has("doc-1"));
+    assert.ok(writtenIds.has("doc-2"));
+    assert.ok(writtenIds.has("doc-3"));
+
+    // Simulate: resume encounters docs 1-5 (docs 1-3 already written)
+    const resumeDocs = [
+      { id: "doc-1", title: "First" },
+      { id: "doc-2", title: "Second" },
+      { id: "doc-3", title: "Third" },
+      { id: "doc-4", title: "Fourth" },
+      { id: "doc-5", title: "Fifth" },
+    ];
+
+    // Only write docs not already in the set
+    for (const doc of resumeDocs) {
+      if (!writtenIds.has(doc.id)) {
+        const line = JSON.stringify(doc) + "\n";
+        fs.appendFileSync(jsonlPath, line, "utf-8");
+        writtenIds.add(doc.id);
+      }
+    }
+
+    // Verify: file should have exactly 5 lines (3 original + 2 new)
+    const raw = fs.readFileSync(jsonlPath, "utf-8").trim();
+    const finalLines = raw.split("\n").filter((l) => l.trim());
+    assert.equal(finalLines.length, 5, "should have 5 docs total (no duplicates)");
+
+    // Verify all IDs are present
+    const finalIds = loadExistingJsonlIds(jsonlPath);
+    assert.equal(finalIds.size, 5);
+    assert.ok(finalIds.has("doc-4"));
+    assert.ok(finalIds.has("doc-5"));
+  });
+
+  it("writes zero duplicates when resuming with all docs already present", () => {
+    const jsonlPath = path.join(tmpDir, "documents.jsonl");
+    const docs = [
+      { id: "doc-1", title: "First" },
+      { id: "doc-2", title: "Second" },
+    ];
+    const lines = docs.map((d) => JSON.stringify(d)).join("\n");
+    fs.writeFileSync(jsonlPath, lines, "utf-8");
+
+    const writtenIds = loadExistingJsonlIds(jsonlPath);
+
+    // Resume encounters the same docs
+    const resumeDocs = [
+      { id: "doc-1", title: "First" },
+      { id: "doc-2", title: "Second" },
+    ];
+
+    for (const doc of resumeDocs) {
+      if (!writtenIds.has(doc.id)) {
+        const line = JSON.stringify(doc) + "\n";
+        fs.appendFileSync(jsonlPath, line, "utf-8");
+        writtenIds.add(doc.id);
+      }
+    }
+
+    // File should still have exactly 2 lines
+    const raw = fs.readFileSync(jsonlPath, "utf-8").trim();
+    const finalLines = raw.split("\n").filter((l) => l.trim());
+    assert.equal(finalLines.length, 2, "should have 2 docs (zero duplicates)");
   });
 });

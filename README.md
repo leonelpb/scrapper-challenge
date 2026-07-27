@@ -1,21 +1,21 @@
-# Scraper Challenge — PJ Peru Jurisprudence + OEFA
+# Scraper Challenge — PJ Perú Jurisprudencia + OEFA
 
-HTTP-only TypeScript scraper that extracts data from Peruvian government procurement sites. No Puppeteer, Playwright, Selenium, or any embedded browser.
+Scraper HTTP-only en TypeScript que extrae datos de sitios de contrataciones públicas del Perú. Sin Puppeteer, Playwright, Selenium ni navegador embebido.
 
-## Sites
+## Sitios
 
-| Profile | URL | JS Framework | VPN Required |
-|---------|-----|-------------|-------------|
+| Perfil | URL | Framework JS | VPN Requerida |
+|--------|-----|-------------|---------------|
 | `oefa` | publico.oefa.gob.pe | JSF + PrimeFaces 6.0 | No |
-| `pj` | jurisprudencia.pj.gob.pe | JSF + RichFaces | Yes (Peru exit node) |
+| `pj` | jurisprudencia.pj.gob.pe | JSF + RichFaces | Sí (nodo de salida Perú) |
 
-## Requirements
+## Requisitos
 
 - Node.js >= 20
 - npm
-- For `pj` profile: VPN with a Peru exit node
+- Para el perfil `pj`: VPN con nodo de salida en Perú
 
-## Installation
+## Instalación
 
 ```bash
 git clone <repo-url>
@@ -24,66 +24,66 @@ npm install
 cp .env.example .env
 ```
 
-## Configuration
+## Configuración
 
-Edit `.env` to control behavior:
+Editar `.env` para controlar el comportamiento:
 
 ```env
-PROFILE=oefa              # "pj" or "oefa"
-MAX_PAGES=3               # 0 = all pages
-MAX_DOCUMENTS=0           # 0 = unlimited
-REQUEST_DELAY_MS=1500     # Delay between requests
-REQUEST_TIMEOUT_MS=60000  # HTTP timeout
-RETRY_MAX=5               # Retries on 429/5xx
-RETRY_BACKOFF_MS=1000     # Exponential backoff base
-DOWNLOAD_PDFS=1           # 0 = skip PDF downloads
+PROFILE=oefa              # "pj" o "oefa"
+MAX_PAGES=3               # 0 = todas las páginas
+MAX_DOCUMENTS=0           # 0 = sin límite
+REQUEST_DELAY_MS=1500     # Retardo entre requests
+REQUEST_TIMEOUT_MS=60000  # Timeout HTTP
+RETRY_MAX=5               # Reintentos en 429/5xx
+RETRY_BACKOFF_MS=1000     # Base de backoff exponencial
+DOWNLOAD_PDFS=1           # 0 = omitir descarga de PDFs
 ```
 
-Or pass flags directly:
+O pasar flags directamente:
 
 ```bash
 node dist/index.js --profile oefa --max-pages 2 --no-pdf
 ```
 
-## Usage
+## Uso
 
-### OEFA (no VPN)
+### OEFA (sin VPN)
 
 ```bash
-# Build
+# Compilar
 npm run build
 
-# Scrape 2 pages, no PDFs
+# Scrapear 2 páginas, sin PDFs
 node dist/index.js --profile oefa --max-pages 2 --no-pdf
 
-# Scrape with PDFs (stops at MAX_PDFS_TO_DOWNLOAD)
+# Scrapear con PDFs (se detiene en MAX_PDFS_TO_DOWNLOAD)
 npm run scrape:oefa
 
-# Resume from checkpoint
+# Reanudar desde checkpoint
 node dist/index.js --profile oefa
 ```
 
-### PJ (VPN connected)
+### PJ (con VPN conectada)
 
 ```bash
 npm run scrape:pj -- --query "despido arbitrario" --max-pages 5
 ```
 
-### CLI Options
+### Opciones CLI
 
 ```
-node dist/index.js [options]
+node dist/index.js [opciones]
 
-Options:
-  --profile <pj|oefa>       Target site (default: from .env)
-  --query <text>            Search term
-  --output <dir>            Output directory
-  --max-pages <n>           Max pages (0 = unlimited)
-  --max-documents <n>       Max documents (0 = unlimited)
-  --delay-ms <n>            Delay between requests (ms)
-  --retries <n>             Max retries
-  --no-pdf                  Skip PDF downloads
-  --help, -h                Show help
+Opciones:
+  --profile <pj|oefa>       Sitio objetivo (default: desde .env)
+  --query <texto>           Término de búsqueda
+  --output <directorio>     Directorio de salida
+  --max-pages <n>           Máximo de páginas (0 = ilimitado)
+  --max-documents <n>       Máximo de documentos (0 = ilimitado)
+  --delay-ms <n>            Retardo entre requests (ms)
+  --retries <n>             Máximo de reintentos
+  --no-pdf                  Omitir descarga de PDFs
+  --help, -h                Mostrar ayuda
 ```
 
 ### Tests
@@ -92,22 +92,22 @@ Options:
 npm test
 ```
 
-27 unit tests covering: parseResults, buildPdfDownloadUrl, generateId, makeSafeFilename, updateViewStateFromResponse, withRetry.
+55 tests unitarios cubriendo: parseResults (OEFA y PJ), buildPdfDownloadUrl, generateId, makeSafeFilename, updateViewStateFromResponse, withRetry, validateJsfResponse, loadExistingJsonlIds, checkpoints (OEFA y PJ), exportToExcel, e idempotencia de escritura.
 
-## Output Structure
+## Estructura de Salida
 
 ```
-output/<profile>/
-├── documents.jsonl          # One JSON per line with all fields
-├── checkpoint.json          # Resume point
-├── failed-downloads.jsonl   # PDFs that failed after retries
+output/<perfil>/
+├── documents.jsonl          # Un JSON por línea con todos los campos
+├── checkpoint.json          # Punto de reanudación
+├── failed-downloads.jsonl   # PDFs que fallaron tras reintentos
 ├── excel/
-│   └── export.xlsx          # Excel export (auto-generated)
+│   └── export.xlsx          # Exportación Excel (auto-generada)
 └── pdfs/
-    └── <filename>.pdf       # Downloaded PDFs
+    └── <nombre>.pdf         # PDFs descargados
 ```
 
-### Document Format
+### Formato de Documento
 
 ```json
 {
@@ -129,69 +129,119 @@ output/<profile>/
 }
 ```
 
-## Source Structure
+## Estructura del Código Fuente
 
 ```
 src/
-├── index.ts              # Entry point + CLI argument parser
-├── config.ts             # Builds AppConfig from env vars
-├── types.ts              # TypeScript interfaces (ScrapedDocument, JsfSession, AppConfig, etc.)
-├── http-client.ts        # Axios instance with cookie jar, retry, backoff + jitter
-├── logger.ts             # Colored console logging (info/success/warn/error/progress/download)
-├── oefa-profile.ts       # OEFA scraper: session init, search, PrimeFaces pagination, PDF download, Excel export
-├── pj-profile.ts         # PJ scraper: session init, search, RichFaces pagination, PDF download
-├── excel-export.ts       # Converts documents.jsonl → formatted .xlsx workbook
-├── oefa-profile.test.ts  # 27 unit tests (Node built-in test runner + tsx)
-└── __fixtures__/         # HTML fixtures for parseResults tests
+├── index.ts              # Punto de entrada + parser de argumentos CLI
+├── config.ts             # Construye AppConfig desde variables de entorno
+├── types.ts              # Interfaces TypeScript (ScrapedDocument, JsfSession, AppConfig, etc.)
+├── http-client.ts        # Instancia Axios con jar de cookies, retry, backoff + jitter, validación JSF
+├── logger.ts             # Logging coloreado en consola (info/success/warn/error/progress/download)
+├── oefa-profile.ts       # Scraper OEFA: init sesión, search, paginación PrimeFaces, descarga PDF, Excel
+├── pj-profile.ts         # Scraper PJ: init sesión, search, paginación RichFaces, descarga PDF
+├── excel-export.ts       # Convierte documents.jsonl → libro .xlsx formateado
+├── oefa-profile.test.ts  # 55 tests unitarios (Node test runner + tsx)
+└── __fixtures__/         # Fixtures HTML para tests de parseResults
     ├── oefa-search-response.html
-    └── oefa-pagination-response.html
+    ├── oefa-pagination-response.html
+    ├── pj-search-response.html
+    └── pj-empty-response.html
 ```
 
-### File Responsibilities
+### Responsabilidades por Archivo
 
-| File | Role |
-|------|------|
-| `index.ts` | CLI entry: parses args, builds config, routes to profile scraper |
-| `config.ts` | Reads `.env` + CLI overrides into typed `AppConfig` |
-| `types.ts` | All TypeScript interfaces: `ScrapedDocument`, `JsfSession`, `AppConfig`, `Checkpoint`, `RetryResult`, `CliArgs` |
-| `http-client.ts` | `createSessionClient()` (cookie jar via interceptors), `withRetry()` (exponential backoff + jitter), `sleep()` |
-| `logger.ts` | Timestamped colored output: INFO/OK/WARN/ERROR/PDF/progress |
-| `oefa-profile.ts` | Full OEFA pipeline: `initSession()` → `search()` → `parseResults()` → `goToPage()` → `downloadPdf()` → `exportToExcel()` |
-| `pj-profile.ts` | Full PJ pipeline: same structure as OEFA but for RichFaces framework |
-| `excel-export.ts` | Reads `documents.jsonl`, flattens nested fields, writes formatted `.xlsx` with column widths and frozen header |
-| `oefa-profile.test.ts` | Tests for parsing, URL building, ID generation, filename sanitization, ViewState extraction, retry logic |
+| Archivo | Rol |
+|---------|-----|
+| `index.ts` | Entrada CLI: parsea args, construye config, enruta al scraper del perfil |
+| `config.ts` | Lee `.env` + overrides CLI en `AppConfig` tipado |
+| `types.ts` | Todas las interfaces: `ScrapedDocument`, `JsfSession`, `AppConfig`, `Checkpoint`, `RetryResult`, `CliArgs` |
+| `http-client.ts` | `createSessionClient()` (jar de cookies via interceptors), `withRetry()` (backoff exponencial + jitter), `validateJsfResponse()` (detección de sesión expirada), `sleep()` |
+| `logger.ts` | Salida coloreada con timestamps: INFO/OK/WARN/ERROR/PDF/progress |
+| `oefa-profile.ts` | Pipeline OEFA completo: `initSession()` → `search()` → `parseResults()` → `goToPage()` → `downloadPdf()` → `exportToExcel()`. Escrituras idempotentes via `loadExistingJsonlIds()`. Checkpoint guard en `loadCheckpoint()`. |
+| `pj-profile.ts` | Pipeline PJ completo: misma estructura que OEFA pero para RichFaces. Escritura única post-descarga PDF (sin duplicados). |
+| `excel-export.ts` | Lee `documents.jsonl`, aplana campos anidados, escribe `.xlsx` formateado con anchos de columna y header congelado |
+| `oefa-profile.test.ts` | Tests de parsing, construcción de URLs, generación de IDs, sanitización de filenames, extracción de ViewState, retry, validación JSF, checkpoints, exportación Excel e idempotencia |
 
-## Tech Stack
+## Stack Tecnológico
 
-| Dependency | Version | Purpose |
-|------------|---------|---------|
-| TypeScript | ^5.7.2 | Type-safe source code |
+| Dependencia | Versión | Propósito |
+|------------|---------|-----------|
+| TypeScript | ^5.7.2 | Código fuente tipado |
 | Node.js | >= 20 | Runtime |
-| Axios | ^1.7.9 | HTTP client with interceptors |
-| Cheerio | ^1.0.0 | HTML parsing (jQuery-like API) |
-| xlsx | ^0.18.5 | Excel export (SheetJS) |
-| dotenv | ^16.4.7 | Environment variable loading |
-| tsx | ^4.23.1 | TypeScript execution for tests |
+| Axios | ^1.7.9 | Cliente HTTP con interceptors |
+| Cheerio | ^1.0.0 | Parsing HTML (API tipo jQuery) |
+| xlsx | ^0.18.5 | Exportación Excel (SheetJS) |
+| dotenv | ^16.4.7 | Carga de variables de entorno |
+| tsx | ^4.23.1 | Ejecución de TypeScript para tests |
 
-## Error Handling
+## Manejo de Errores
 
-- **429 Too Many Requests**: Exponential backoff with jitter, respects `Retry-After` header
-- **408/5xx**: Retried with same backoff strategy
-- **Network errors**: Retried without delay escalation
-- **PDF validation**: Magic bytes `%PDF-` checked (not just Content-Type)
-- **Non-retryable errors** (4xx except 408/429): Fail immediately
+### Reintentos con Backoff Exponencial + Jitter
 
-## Checkpoint / Resume
+```
+intento 1: esperar 1000ms ± 25%
+intento 2: esperar 2000ms ± 25%
+intento 3: esperar 4000ms ± 25%
+intento 4: esperar 8000ms ± 25%
+intento 5: esperar 16000ms ± 25%
+```
 
-The scraper saves `checkpoint.json` after each page. If interrupted, re-running automatically resumes from the last completed page.
+**Reintentado en:** 429 (rate limit), 408 (timeout), 5xx (error de servidor), errores de red.
+**No reintentado en:** 4xx (excepto 408/429) — son fallos permanentes.
 
-## Responsible Use
+Respeta el header `Retry-After` cuando el servidor lo envía.
 
-- Keep delays >= 1000ms between requests
-- No aggressive concurrency
-- Respect server limits
-- Use `--max-pages` and `--max-documents` during development
+### Detección de Sesión Expirada
 
-## License
+JSF retorna HTTP 200 incluso cuando la sesión expiró — simplemente sirve la página de login. `validateJsfResponse()` detecta esto verificando:
+
+1. **Presencia de ViewState:** toda respuesta JSF válida contiene `javax.faces.ViewState`. Si no está, la sesión expiró.
+2. **Patrones de login:** si la respuesta contiene "iniciar sesión" + campo de password, es una página de login disfrazada de 200.
+
+Se aplica en `initSession()`, `search()` y `goToPage()` de ambos perfiles (OEFA y PJ).
+
+### Validación de PDFs
+
+Se verifican los magic bytes `%PDF-` — no solo el Content-Type, porque las respuestas de error a veces retornan HTML con status 200.
+
+## Checkpoint / Reanudación
+
+El scraper guarda `checkpoint.json` después de cada página. Si se interrumpe, re-ejecutar reanuda automáticamente desde la última página completada.
+
+**Idempotencia:** al reanudar, el scraper carga los IDs de documentos ya escritos en el JSONL (`loadExistingJsonlIds()`) y los almacena en un `Set`. Antes de escribir cada documento, verifica si el ID ya existe. Si existe, lo salta. Esto garantiza que re-ejecutar nunca duplica registros.
+
+```json
+{
+  "profile": "oefa",
+  "nextPage": 3,
+  "nextPosition": 0,
+  "totalDocuments": 20,
+  "completed": false,
+  "timestamp": "2026-07-25T15:34:08.489Z"
+}
+```
+
+**Reglas del checkpoint:**
+- Si `completed: true`, el checkpoint se ignora (el scraping ya terminó).
+- Si el `profile` no coincide, se ignora.
+- Si el `searchTerm` no coincide (PJ), se ignora.
+- Si el JSON está malformado, se ignora.
+
+## Escritura Única de Documentos
+
+Cada documento se escribe al JSONL **una sola vez**, después del intento de descarga PDF. Esto garantiza que el campo `pdfFile` ya está seteado en el registro y no hay duplicados.
+
+**Antes (bug):** escribir → descargar PDF → escribir otra vez con `pdfFile` = 2 registros por documento.
+**Ahora:** descargar PDF → escribir una vez con `pdfFile` = 1 registro por documento.
+
+## Uso Responsable
+
+- Mantener delays >= 1000ms entre requests
+- Sin concurrencia agresiva
+- Respetar los límites del servidor
+- Usar `--max-pages` y `--max-documents` durante desarrollo
+
+## Licencia
 
 MIT

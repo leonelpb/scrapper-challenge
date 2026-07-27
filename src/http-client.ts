@@ -1,6 +1,5 @@
 import axios, {
   type AxiosInstance,
-  type AxiosRequestConfig,
   type AxiosResponse,
   type InternalAxiosRequestConfig,
 } from "axios";
@@ -120,6 +119,34 @@ export async function withRetry<T>(
     attempts: retryMax,
     finalStatus: lastStatus,
   };
+}
+
+/**
+ * Validate that a JSF response contains a ViewState, indicating the session is alive.
+ *
+ * JSF applications return HTTP 200 even when the session has expired — they serve
+ * the login page with a 200 status. This helper detects that pattern so callers
+ * can retry with a fresh session instead of silently processing garbage data.
+ */
+export function validateJsfResponse(html: string, context: string): void {
+  // Check 1: ViewState must be present in valid JSF responses
+  if (!html.includes("javax.faces.ViewState")) {
+    throw new Error(
+      `${context}: Response missing ViewState — session may have expired. ` +
+        `Got ${html.length} chars, no javax.faces.ViewState found.`
+    );
+  }
+
+  // Check 2: Detect login-page patterns that indicate session expiry
+  const lower = html.toLowerCase();
+  if (
+    (lower.includes("iniciar sesión") || lower.includes("iniciar sesion")) &&
+    (lower.includes("password") || lower.includes("contraseña") || lower.includes("contrasena"))
+  ) {
+    throw new Error(
+      `${context}: Response is a login page — session has expired.`
+    );
+  }
 }
 
 /**

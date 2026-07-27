@@ -20,7 +20,7 @@ import type {
   FailedDownload,
   Checkpoint,
 } from "./types.js";
-import { createSessionClient, withRetry, sleep } from "./http-client.js";
+import { createSessionClient, withRetry, sleep, validateJsfResponse } from "./http-client.js";
 import { log } from "./logger.js";
 
 // ── Output paths ───────────────────────────────────────────────
@@ -56,6 +56,9 @@ export async function initSession(
     }
     throw new Error(`PJ init failed: HTTP ${res.status}`);
   }
+
+  const html = typeof res.data === "string" ? res.data : "";
+  validateJsfResponse(html, "PJ initSession");
 
   const $ = cheerio.load(res.data as string);
 
@@ -114,6 +117,9 @@ export async function search(
   // RichFaces may redirect to resultado.xhtml
   // Check if we ended up on the results page
   const html = typeof res.data === "string" ? res.data : "";
+
+  // Validate session is alive (JSF returns 200 even on expiry)
+  validateJsfResponse(html, "PJ search");
 
   // Update ViewState from response
   const $ = cheerio.load(html);
@@ -300,6 +306,9 @@ export async function goToPage(
 
   const data = res.data as string;
 
+  // Validate session is alive (JSF returns 200 even on expiry)
+  validateJsfResponse(data, `PJ goToPage ${targetPage}`);
+
   // Update ViewState
   const $ = cheerio.load(data);
   const newViewState =
@@ -388,6 +397,13 @@ export async function scrape(config: AppConfig): Promise<void> {
   fs.mkdirSync(config.outputDir, { recursive: true });
   fs.mkdirSync(path.join(config.outputDir, "pdfs"), { recursive: true });
 
+  // Load existing document IDs for idempotent writes
+  const jsonlPath = path.join(config.outputDir, DATA_FILE);
+  const writtenIds = loadExistingJsonlIds(jsonlPath);
+  if (writtenIds.size > 0) {
+    log.info(`PJ: Found ${writtenIds.size} existing documents — will skip duplicates`);
+  }
+
   // Load checkpoint if exists
   const checkpoint = loadCheckpoint(config);
   let startPage = checkpoint?.nextPage ?? 1;
@@ -473,17 +489,18 @@ export async function scrape(config: AppConfig): Promise<void> {
         `PJ document: ${doc.title}`
       );
 
-      // Write document to JSONL
-      appendJsonl(path.join(config.outputDir, DATA_FILE), doc);
-
-      // Download PDF if enabled
+      // Download PDF if enabled (before writing, so pdfFile is set on first write)
       if (config.downloadPdfs && doc.pdfUrl) {
         const filename = await downloadPdf(client, config, session, doc, config.outputDir);
         if (filename) {
           doc.pdfFile = filename;
-          // Update the JSONL entry with PDF filename
-          appendJsonl(path.join(config.outputDir, DATA_FILE), doc);
         }
+      }
+
+      // Write document to JSONL (ONCE — idempotent)
+      if (!writtenIds.has(doc.id)) {
+        appendJsonl(jsonlPath, doc);
+        writtenIds.add(doc.id);
       }
 
       await sleep(config.requestDelayMs);
@@ -545,12 +562,41 @@ function appendJsonl(filePath: string, data: unknown): void {
   fs.appendFileSync(filePath, line, "utf-8");
 }
 
-function saveCheckpoint(config: AppConfig, checkpoint: Checkpoint): void {
+/**
+ * Load document IDs already present in a JSONL file.
+ * Used to make append operations idempotent — resuming a scraped run
+ * will not duplicate documents that were written before interruption.
+ */
+function loadExistingJsonlIds(filePath: string): Set<string> {
+  const ids = new Set<string>();
+  if (!fs.existsSync(filePath)) return ids;
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8").trim();
+    if (!raw) return ids;
+
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const doc = JSON.parse(line) as { id?: string };
+        if (doc.id) ids.add(doc.id);
+      } catch {
+        // Skip malformed lines
+      }
+    }
+  } catch {
+    // File read error — start fresh
+  }
+
+  return ids;
+}
+
+export function saveCheckpoint(config: AppConfig, checkpoint: Checkpoint): void {
   const filePath = path.join(config.outputDir, CHECKPOINT_FILE);
   fs.writeFileSync(filePath, JSON.stringify(checkpoint, null, 2), "utf-8");
 }
 
-function loadCheckpoint(config: AppConfig): Checkpoint | null {
+export function loadCheckpoint(config: AppConfig): Checkpoint | null {
   const filePath = path.join(config.outputDir, CHECKPOINT_FILE);
   if (!fs.existsSync(filePath)) return null;
 
