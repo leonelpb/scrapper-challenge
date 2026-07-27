@@ -232,8 +232,6 @@ El scraper guarda `checkpoint.json` después de cada página. Si se interrumpe, 
 
 Cada documento se escribe al JSONL **una sola vez**, después del intento de descarga PDF. Esto garantiza que el campo `pdfFile` ya está seteado en el registro y no hay duplicados.
 
-**Antes (bug):** escribir → descargar PDF → escribir otra vez con `pdfFile` = 2 registros por documento.
-**Ahora:** descargar PDF → escribir una vez con `pdfFile` = 1 registro por documento.
 
 ## Uso Responsable
 
